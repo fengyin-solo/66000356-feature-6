@@ -57,12 +57,12 @@ function parseSQL(sql: string): ParsedQuery {
   const up = sql.toUpperCase().trim()
   const type = ['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'CREATE'].find(t => up.startsWith(t)) as ParsedQuery['type'] || 'UNKNOWN'
   const tables = Array.from(sql.matchAll(/(?:FROM|JOIN|INTO|UPDATE)\s+([a-zA-Z_]\w*)/gi)).map(m => m[1].toLowerCase())
-  const columns = type === 'SELECT' ? Array.from(sql.matchAll(/SELECT\s+([\s\S]*?)\s+FROM/i)[0]?.[1]?.split(',').map(s => s.trim()) || []) : []
+  const columns = type === 'SELECT' ? (sql.match(/SELECT\s+([\s\S]*?)\s+FROM/i)?.[1]?.split(',').map(s => s.trim()) || []) : []
   const joins = Array.from(sql.matchAll(/(LEFT|RIGHT|INNER|OUTER|CROSS|FULL)?\s*JOIN\s+([a-zA-Z_]\w*)\s+ON\s+([^JOIN|WHERE|GROUP|ORDER|LIMIT]+)/gi)).map(m => ({ type: (m[1] || 'INNER').trim(), table: m[2], condition: m[3].trim() }))
   const whereMatch = sql.match(/WHERE\s+([\s\S]*?)(?:GROUP|ORDER|LIMIT|$)/i)
   const whereConditions = whereMatch ? whereMatch[1].split(/\s+AND\s+|\s+OR\s+/i).map(s => s.trim()).filter(Boolean) : []
-  const orderBy = Array.from(sql.matchAll(/ORDER\s+BY\s+([\s\S]*?)(?:LIMIT|$)/i)[0]?.[1]?.split(',').map(s => s.trim()) || [])
-  const groupBy = Array.from(sql.matchAll(/GROUP\s+BY\s+([\s\S]*?)(?:HAVING|ORDER|LIMIT|$)/i)[0]?.[1]?.split(',').map(s => s.trim()) || [])
+  const orderBy = sql.match(/ORDER\s+BY\s+([\s\S]*?)(?:LIMIT|$)/i)?.[1]?.split(',').map(s => s.trim()) || []
+  const groupBy = sql.match(/GROUP\s+BY\s+([\s\S]*?)(?:HAVING|ORDER|LIMIT|$)/i)?.[1]?.split(',').map(s => s.trim()) || []
   const limitMatch = sql.match(/LIMIT\s+(\d+)/i)
   const limit = limitMatch ? parseInt(limitMatch[1]) : undefined
 
@@ -73,7 +73,7 @@ function parseSQL(sql: string): ParsedQuery {
   if (joins.length > 3) suggestions.push('连接表过多（>3），考虑分解查询')
   if (!whereConditions.length && type === 'SELECT') suggestions.push('无 WHERE 条件，将扫描全表')
   if (sql.includes('SELECT *')) suggestions.push('避免 SELECT *，明确指定列名')
-  if (sql.toUpperCase().includes('LIKE '%')) suggestions.push('前缀通配符 LIKE '%...' 无法使用索引')
+  if (sql.toUpperCase().includes("LIKE '%")) suggestions.push('前缀通配符 LIKE \'%...\' 无法使用索引')
   if (!limit && type === 'SELECT') suggestions.push('建议添加 LIMIT 限制结果集大小')
 
   return { type, tables, columns, joins, whereConditions, orderBy, groupBy, limit, complexity, suggestions, estimatedCost: Math.round(estimatedCost) }
@@ -93,26 +93,54 @@ function buildPlan(parsed: ParsedQuery): QueryPlan {
   return { operation: parsed.orderBy.length ? 'Sort' : 'Result', cost: join.cost * 1.1, rows: join.rows, children: [join] }
 }
 
-export const SQL_TEMPLATES = [
-  { name: '基础查询', sql: 'SELECT id, username, email
+export interface SQLTemplate {
+  name: string
+  /** 模板说明：这条 SQL 在做什么 */
+  desc: string
+  /** 适用场景提示：什么时候选它作为分析起点 */
+  scenario: string
+  sql: string
+}
+
+export const SQL_TEMPLATES: SQLTemplate[] = [
+  {
+    name: '基础查询',
+    desc: '单表 SELECT，带 WHERE 状态过滤与 LIMIT 分页。',
+    scenario: '首次体验推荐：观察索引扫描、行数估算等基础分析结果。',
+    sql: `SELECT id, username, email
 FROM users
 WHERE status = 'active'
-LIMIT 100;' },
-  { name: '多表JOIN', sql: 'SELECT u.username, o.id AS order_id, p.name AS product, o.amount
+LIMIT 100;`,
+  },
+  {
+    name: '多表JOIN',
+    desc: 'users / orders / products 三表 INNER JOIN，含排序与 LIMIT。',
+    scenario: '想分析 JOIN 顺序、连接成本与执行计划树形态时选它。',
+    sql: `SELECT u.username, o.id AS order_id, p.name AS product, o.amount
 FROM users u
 INNER JOIN orders o ON u.id = o.user_id
 INNER JOIN products p ON o.product_id = p.id
 WHERE o.status = 'completed'
 ORDER BY o.created_at DESC
-LIMIT 50;' },
-  { name: '聚合分析', sql: 'SELECT c.name AS category, COUNT(o.id) AS order_count, SUM(o.amount) AS revenue, AVG(o.amount) AS avg_amount
+LIMIT 50;`,
+  },
+  {
+    name: '聚合分析',
+    desc: 'GROUP BY + HAVING + COUNT/SUM/AVG 的多表分组统计。',
+    scenario: '关注聚合、分组过滤对复杂度和排序开销的影响时选它。',
+    sql: `SELECT c.name AS category, COUNT(o.id) AS order_count, SUM(o.amount) AS revenue, AVG(o.amount) AS avg_amount
 FROM categories c
 LEFT JOIN products p ON c.id = p.category_id
 LEFT JOIN orders o ON p.id = o.product_id
 GROUP BY c.id, c.name
 HAVING COUNT(o.id) > 10
-ORDER BY revenue DESC;' },
-  { name: '子查询', sql: 'SELECT username, email
+ORDER BY revenue DESC;`,
+  },
+  {
+    name: '子查询',
+    desc: 'WHERE IN 子查询，内层含 DISTINCT 去重与多条件过滤。',
+    scenario: '想观察子查询展开、去重带来的额外成本与改写建议时选它。',
+    sql: `SELECT username, email
 FROM users
 WHERE id IN (
   SELECT DISTINCT user_id
@@ -120,10 +148,16 @@ WHERE id IN (
   WHERE amount > 1000
   AND created_at >= '2024-01-01'
 )
-ORDER BY username;' },
-  { name: '全表扫描', sql: 'SELECT *
+ORDER BY username;`,
+  },
+  {
+    name: '全表扫描',
+    desc: 'SELECT * 搭配对列使用 YEAR() 函数过滤的反例查询。',
+    scenario: '想触发全表扫描、SELECT * 等优化警告时选它（反面教材）。',
+    sql: `SELECT *
 FROM orders
-WHERE YEAR(created_at) = 2024;' },
+WHERE YEAR(created_at) = 2024;`,
+  },
 ]
 
 export const SCHEMA_TABLES = SCHEMA

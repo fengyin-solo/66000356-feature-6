@@ -7,13 +7,17 @@
     <div class="flex flex-col lg:flex-row gap-4 p-4">
       <div class="lg:w-2/5 space-y-4">
         <div class="bg-slate-800 rounded-lg p-4 border border-slate-700">
-          <div class="flex items-center justify-between mb-3">
+          <div class="flex items-center justify-between mb-2">
             <h3 class="text-sm font-bold text-slate-400">SQL 编辑器</h3>
             <div class="flex gap-2">
-              <select @change="(e) => { store.sql = SQL_TEMPLATES[+(e.target as HTMLSelectElement).value].sql }" class="text-xs bg-slate-900 border border-slate-600 rounded px-2 py-1 text-slate-300">
-                <option v-for="(t, i) in SQL_TEMPLATES" :key="i" :value="i">{{ t.name }}</option>
+              <select :value="selectedTemplate" @change="applyTemplate" class="text-xs bg-slate-900 border border-slate-600 rounded px-2 py-1 text-slate-300">
+                <option v-for="(t, i) in SQL_TEMPLATES" :key="i" :value="i" :title="t.desc">{{ t.name }}</option>
               </select>
             </div>
+          </div>
+          <div class="mb-3 text-xs bg-slate-900/60 border border-slate-700 rounded p-2 space-y-1">
+            <p class="text-slate-400"><span class="text-cyan-400 font-bold">模板说明：</span>{{ templateInfo.desc }}</p>
+            <p class="text-slate-500"><span class="text-amber-400 font-bold">适用场景：</span>{{ templateInfo.scenario }}</p>
           </div>
           <textarea v-model="store.sql" rows="12" class="w-full bg-slate-900 border border-slate-600 rounded px-3 py-2 text-sm font-mono text-green-400 focus:outline-none focus:border-cyan-500 resize-none"></textarea>
           <button @click="store.analyze" class="w-full mt-3 py-2 bg-cyan-600 hover:bg-cyan-500 rounded text-sm font-bold">分析查询</button>
@@ -73,11 +77,19 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch, onMounted, defineComponent, h } from 'vue'
+import { ref, computed, watch, onMounted, defineComponent, h } from 'vue'
 import { useSQLStore, SQL_TEMPLATES, SCHEMA_TABLES } from './store/sql'
 
 const store = useSQLStore()
 const erCanvasRef = ref<HTMLCanvasElement | null>(null)
+
+const selectedTemplate = ref(0)
+const templateInfo = computed(() => SQL_TEMPLATES[selectedTemplate.value])
+function applyTemplate(e: Event) {
+  const i = +(e.target as HTMLSelectElement).value
+  selectedTemplate.value = i
+  store.sql = SQL_TEMPLATES[i].sql
+}
 
 const PlanNode = defineComponent({
   props: { node: Object, depth: Number },
